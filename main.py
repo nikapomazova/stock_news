@@ -1,11 +1,31 @@
 import pandas_market_calendars as mcal
 import yfinance as yf
 import pandas as pd
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+# directions for cached data of tickers
+DATA_DIR = Path("data")
+MARKET_DATA_DIR = DATA_DIR / "market"
+BETA_DATA_DIR = DATA_DIR / "beta"
+
+MARKET_DATA_DIR.mkdir(parents=True, exist_ok=True)
+BETA_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # importing market calendar
 nyse = mcal.get_calendar("NYSE")
 TRADING_HOURS_PER_DAY = 6.5
 TRADING_MINUTES_PER_DAY = TRADING_HOURS_PER_DAY * 60
+
+# guidance revision functions
+
+def guidance_revision(old_guid, new_guid):
+    return (new_guid - old_guid) / old_guid
+
+def guidance_range_revision(old_low, old_high, new_low, new_high):
+    old_guid = (old_high + old_low)/2
+    new_guid = (new_high + new_low)/2
+    return guidance_revision(old_guid, new_guid)
 
 # helper functions
 
@@ -13,6 +33,10 @@ TRADING_MINUTES_PER_DAY = TRADING_HOURS_PER_DAY * 60
 # that is at or before the target time.
 def get_available_time(data, target_time):
     valid_times = data.index[data.index <= target_time]
+    if len(valid_times) == 0:
+        raise ValueError(
+            f"No price data available at or before {target_time}"
+        )
     return valid_times[-1]
 
 # Find return percentage
@@ -174,8 +198,9 @@ def get_baseline_time_and_price(data, event_time, reaction_start, ticker):
 # final function to return immediate, 1 hour, 1 day, 3 days return of a company
 # after an event, as well as its beta and alpha adjusted returns
 
-def returns_adjusted(event, beta_data, ticker, market_ticker, schedule, ticker_data, market_ticker_data):
+def returns_adjusted(event, beta_data, market_ticker, schedule, ticker_data, market_ticker_data):
 
+    ticker = event["ticker"]
     # ALPHA AND BETA
 
     # taking close prices from each day
@@ -189,10 +214,6 @@ def returns_adjusted(event, beta_data, ticker, market_ticker, schedule, ticker_d
     market_variance = daily_returns[market_ticker].var()
     beta = covariance / market_variance
     alpha = daily_returns[ticker].mean() - beta * daily_returns[market_ticker].mean()
-
-    # prints
-    print(f"{ticker} beta: {beta:.2f}")
-    print(f"{ticker} alpha: {alpha:.5f}")
 
     # RETURNS
 
@@ -236,67 +257,81 @@ def returns_adjusted(event, beta_data, ticker, market_ticker, schedule, ticker_d
     three_days_adjusted_return = a_and_b_adjusted_return(three_days_return, three_days_return_market, beta, 3 * alpha)
 
     return {
-        f"immediate return of {ticker}": immediate_return,
-        f"1 hour return of {ticker}": one_hour_return,
-        f"1 day return of {ticker}": one_day_return,
-        f"3 days return of {ticker}": three_days_return,
+        "immediate return": immediate_return,
+        "1 hour return": one_hour_return,
+        "1 day return": one_day_return,
+        "3 days return": three_days_return,
 
-        f"immediate adjusted return of {ticker}": immediate_adjusted_return,
-        f"1 hour adjusted return of {ticker}": one_hour_adjusted_return,
-        f"1 day adjusted return of {ticker}": one_day_adjusted_return,
-        f"3 days adjusted return of {ticker}": three_days_adjusted_return
+        "immediate adjusted return": immediate_adjusted_return,
+        "1 hour adjusted return": one_hour_adjusted_return,
+        "1 day adjusted return": one_day_adjusted_return,
+        "3 days adjusted return": three_days_adjusted_return
     }
 
+# functions for using
 
-# tests
+def get_beta_data(ticker1, ticker2, start, finish, interval="1d"):
+    return yf.download(
+        [ticker1, ticker2],
+        start=start,
+        end=finish,
+        interval=interval)
 
-beta_data = yf.download(
-    ["SEI", "SPY"],
-    start="2026-02-13",
-    end="2026-08-05",
-    interval="1d"
-)
+def get_stock_data(ticker, event, interval="5m", days_before=3, days_after=10):
+    event_time = pd.Timestamp(event["event_time"])
 
-schedule = nyse.schedule(
-    start_date="2026-08-05",
-    end_date="2026-08-12"
-)
+    start_date = (event_time.normalize() - pd.Timedelta(days=days_before))
+    end_date = (event_time.normalize() + pd.Timedelta(days=days_after))
 
-event = {
-    "company": "Solaris Energy Infrastructure",
-    "ticker": "SEI",
-    "event_time": "2026-08-05 16:05",
-    "event_type": "guidance_raise",
-    "guidance_metric": "adjusted_ebitda",
+    filename = (
+        f"{ticker}_{start_date.date()}_{end_date.date()}_{interval}.parquet"
+    )
 
-    "previous_guidance_low": 80.00,
-    "previous_guidance_high": 95.00,
+    filepath = MARKET_DATA_DIR / filename
 
-    "new_guidance_low": 90.00,
-    "new_guidance_high": 105.00
-}
+    if filepath.exists():
+        print(f"Loading {ticker} from cache")
+        return pd.read_parquet(filepath)
 
-sei = yf.download(
-    "SEI",
-    start="2026-08-05",
-    end="2026-08-11",
-    interval="5m"
-)
+    print(f"Downloading {ticker}")
 
-spy = yf.download(
-    "SPY",
-    start="2026-08-05",
-    end="2026-08-11",
-    interval="5m"
-)
+    data = yf.download(
+        ticker,
+        start=start_date,
+        end=end_date,
+        interval=interval
+    )
 
-returns = returns_adjusted(event, beta_data, "SEI", "SPY", schedule, sei, spy)
-for key, value in returns.items():
-    print(f"{key}: {value:.2%}")
+    data.to_parquet(filepath)
 
-# start = pd.Timestamp(
-#     "2026-08-05 15:30",
-#     tz="America/New_York"
-# )
+    return data
 
-# print(add_trading_minutes(start, 60, schedule))
+def analyze_event(event, market_ticker = "SPY"):
+    ticker = event["ticker"]
+
+    event_time = pd.Timestamp(
+        event["event_time"],
+        tz="America/New_York"
+    )
+    beta_start = event_time - pd.Timedelta(days=180)
+
+    beta_data = get_beta_data(ticker,
+                              market_ticker,
+                              beta_start,
+                              event_time)
+    
+    nyse = mcal.get_calendar("NYSE")
+
+    schedule = nyse.schedule(
+        start_date=event_time.normalize(),
+        end_date=event_time.normalize() + pd.Timedelta(days=10)
+    )
+    
+    stock_data = get_stock_data(ticker, event)
+    market_stock_data = get_stock_data(market_ticker, event)
+    return returns_adjusted(event,
+                            beta_data,
+                            market_ticker,
+                            schedule,
+                            stock_data,
+                            market_stock_data)
