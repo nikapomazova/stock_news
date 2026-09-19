@@ -1,6 +1,7 @@
 import main
 from data import events_manual
 from main import pd
+import matplotlib.pyplot as plt
 
 # beta_data = main.yf.download(
 #     ["SEI", "SPY"],
@@ -107,3 +108,28 @@ print(
         }
     )
 )
+
+# plot
+
+horizons = ["immediate_adjusted", "1h_adjusted", "1d_adjusted", "3d_adjusted"]
+labels = ["Immediate", "1 hour", "1 day", "3 days"]
+
+plt.figure(figsize=(8, 5))
+
+for _, row in events_df.iterrows():
+    values = [row[col] * 100 for col in horizons]
+
+    plt.plot(
+        labels,
+        values,
+        marker="o",
+        label=row["ticker"]
+    )
+
+plt.axhline(0)
+plt.xlabel("Time after event")
+plt.ylabel("Abnormal return (%)")
+plt.title("Stock Reaction Trajectories After Guidance Events")
+plt.legend()
+
+plt.show()

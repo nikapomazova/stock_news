@@ -195,12 +195,14 @@ def get_baseline_time_and_price(data, event_time, reaction_start, ticker):
 
     return baseline_time, baseline_price
 
-# final function to return immediate, 1 hour, 1 day, 3 days return of a company
+# final function to return returns of a company over times_after_event times
 # after an event, as well as its beta and alpha adjusted returns
 
-def returns_adjusted(event, beta_data, market_ticker, schedule, ticker_data, market_ticker_data):
+def returns_adjusted(event, beta_data, market_ticker, schedule, ticker_data,
+                     market_ticker_data, times_after_event, time_labels):
 
     ticker = event["ticker"]
+
     # ALPHA AND BETA
 
     # taking close prices from each day
@@ -225,47 +227,67 @@ def returns_adjusted(event, beta_data, market_ticker, schedule, ticker_data, mar
         ticker_data
     )
 
-    target_times = get_target_times(reaction_start, schedule)
+    target_times = {}
 
-    baseline_time, baseline_price = get_baseline_time_and_price(ticker_data, event_time, reaction_start, ticker)
-    baseline_time_market, baseline_price_market = get_baseline_time_and_price(market_ticker_data, event_time, reaction_start, market_ticker)
+    for time, label in zip(times_after_event, time_labels):
 
-    _, immediate_price = get_time_and_price_at_target(ticker_data, target_times["immediate"], ticker, schedule)
-    _, one_hour_price = get_time_and_price_at_target(ticker_data, target_times["1 hour"], ticker, schedule)
-    _, one_day_price = get_time_and_price_at_target(ticker_data, target_times["1 day"], ticker, schedule)
-    _, three_days_price = get_time_and_price_at_target(ticker_data, target_times["3 days"], ticker, schedule)
+        if time == "immediate":
+            target_times[label] = reaction_start
 
-    _, immediate_price_market = get_time_and_price_at_target(market_ticker_data, target_times["immediate"], market_ticker, schedule)
-    _, one_hour_price_market = get_time_and_price_at_target(market_ticker_data, target_times["1 hour"], market_ticker, schedule)
-    _, one_day_price_market = get_time_and_price_at_target(market_ticker_data, target_times["1 day"], market_ticker, schedule)
-    _, three_days_price_market = get_time_and_price_at_target(market_ticker_data, target_times["3 days"], market_ticker, schedule)
+        elif time.endswith("h"):
+            hours = int(time[:-1])
+            target_times[label] = add_trading_minutes(reaction_start, hours * 60, schedule)
 
-    immediate_return = calculate_return(baseline_price, immediate_price)
-    one_hour_return = calculate_return(baseline_price, one_hour_price)
-    one_day_return = calculate_return(baseline_price, one_day_price)
-    three_days_return = calculate_return(baseline_price, three_days_price)
+        elif time.endswith("d"):
+            days = int(time[:-1])
+            target_times[label] = add_trading_minutes(reaction_start, days * 390, schedule)
 
-    immediate_return_market = calculate_return(baseline_price_market, immediate_price_market)
-    one_hour_return_market = calculate_return(baseline_price_market, one_hour_price_market)
-    one_day_return_market = calculate_return(baseline_price_market, one_day_price_market)
-    three_days_return_market = calculate_return(baseline_price_market, three_days_price_market)
+    _, baseline_price = get_baseline_time_and_price(ticker_data, event_time, reaction_start, ticker)
 
-    # a is 0 because it was calculated based on daily, not hourly data
-    immediate_adjusted_return = a_and_b_adjusted_return(immediate_return, immediate_return_market, beta, 0)
-    one_hour_adjusted_return = a_and_b_adjusted_return(one_hour_return, one_hour_return_market, beta, 0)
-    one_day_adjusted_return = a_and_b_adjusted_return(one_day_return, one_day_return_market, beta, alpha)
-    three_days_adjusted_return = a_and_b_adjusted_return(three_days_return, three_days_return_market, beta, 3 * alpha)
+    _, baseline_price_market = get_baseline_time_and_price(market_ticker_data, event_time,
+                                                           reaction_start, market_ticker)
+
+    prices = {}
+    market_prices = {}
+
+    for label in time_labels:
+
+        _, prices[label] = get_time_and_price_at_target(ticker_data, target_times[label], ticker, schedule)
+
+        _, market_prices[label] = get_time_and_price_at_target(market_ticker_data, target_times[label],
+                                                               market_ticker, schedule)
+
+    returns = {}
+    market_returns = {}
+
+    for label in time_labels:
+
+        returns[label] = calculate_return(baseline_price, prices[label])
+
+        market_returns[label] = calculate_return(baseline_price_market, market_prices[label])
+
+    adjusted_returns = {}
+
+    for time, label in zip(times_after_event, time_labels):
+
+        # a is 0 because it was calculated based on daily, not hourly data
+        if time == "immediate" or time.endswith("h"):
+            alpha_adjustment = 0
+
+        elif time.endswith("d"):
+            days = int(time[:-1])
+            alpha_adjustment = days * alpha
+
+        adjusted_returns[label] = a_and_b_adjusted_return(
+            returns[label],
+            market_returns[label],
+            beta,
+            alpha_adjustment
+        )
 
     return {
-        "immediate return": immediate_return,
-        "1 hour return": one_hour_return,
-        "1 day return": one_day_return,
-        "3 days return": three_days_return,
-
-        "immediate adjusted return": immediate_adjusted_return,
-        "1 hour adjusted return": one_hour_adjusted_return,
-        "1 day adjusted return": one_day_adjusted_return,
-        "3 days adjusted return": three_days_adjusted_return
+        "returns": returns,
+        "adjusted returns": adjusted_returns
     }
 
 # functions for using
@@ -306,7 +328,9 @@ def get_stock_data(ticker, event, interval="5m", days_before=3, days_after=10):
 
     return data
 
-def analyze_event(event, market_ticker = "SPY"):
+def analyze_event(event, market_ticker = "SPY",
+                  times_after_event = ["immediate", "1h", "3h", "1d", "3d"],
+                  time_labels = ["immediate", "1 hour", "3 hours", "1 day", "3 days"]):
     ticker = event["ticker"]
 
     event_time = pd.Timestamp(
@@ -334,4 +358,6 @@ def analyze_event(event, market_ticker = "SPY"):
                             market_ticker,
                             schedule,
                             stock_data,
-                            market_stock_data)
+                            market_stock_data,
+                            times_after_event,
+                            time_labels)

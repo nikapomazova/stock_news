@@ -1,4 +1,3 @@
-import main, tests
 from tests import events_df
 import streamlit as st
 
